@@ -7,6 +7,7 @@
 
 import Foundation
 
+@MainActor
 final class AppContainer {
 
     let dataStoreContainer: DataStoreContainer
@@ -46,14 +47,6 @@ final class AppContainer {
             networkMonitor: networkMonitor
         )
         self.dataSyncService = dataSyncService
-
-        // Automatic sync when network returns
-        networkMonitor.onConnectionRestored = {
-            Task {
-                await dataSyncService.syncPendingFavoriteChanges()
-            }
-        }
-
         self.imageLoader = ImageLoader()
     }
 }

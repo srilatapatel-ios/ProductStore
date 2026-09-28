@@ -13,40 +13,102 @@ import Network
 final class NetworkMonitor: NetworkMonitoring {
     
     private(set) var isConnected = true
-    var onConnectionRestored: (() -> Void)?
-    private let monitor = NWPathMonitor()
-    private let queue = DispatchQueue(label: "NetworkMonitor")
+    @ObservationIgnored
+    private var monitor: NWPathMonitor?
+    @ObservationIgnored
+    private var monitoringTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var wakeContinuation: AsyncStream<Void>.Continuation?
+    private let checkInterval: Duration = .seconds(15)
     
     func startMonitoring() {
-        monitor.pathUpdateHandler = { [weak self] path in
-            let connected = path.status == .satisfied
-            print("Network status:", connected ? "CONNECTED" : "OFFLINE")
-            Task { @MainActor in
-                guard let self else { return }
-                // Remember the previous state
-                let wasDisconnected = !self.isConnected
-                // Update current state
-                self.isConnected = connected
-                // Connection changed from OFFLINE → ONLINE
-                if wasDisconnected && connected {
-                    print("🔄 Connection restored")
-                    self.onConnectionRestored?()
+        guard monitoringTask == nil else {
+            return
+        }
+        
+        let (stream, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        wakeContinuation = continuation
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { _ in
+            continuation.yield()
+        }
+        
+        monitor.start(queue: DispatchQueue(label: "NetworkMonitor"))
+        self.monitor = monitor
+        monitoringTask = Task { [weak self] in
+            await self?.check()
+            await withTaskGroup(of: Void.self) { group in
+                // Check immediately when NWPathMonitor reports a change.
+                group.addTask {
+                    for await _ in stream {
+                        guard !Task.isCancelled else { return }
+                        await self?.check()
+                    }
+                }
+                group.addTask {
+                    while !Task.isCancelled {
+                        try? await Task.sleep(for: self?.checkInterval ?? .seconds(15))
+                        guard !Task.isCancelled else { return }
+                        await self?.check()
+                    }
                 }
             }
         }
-        monitor.start(queue: queue)
     }
     
-    // Required by NetworkMonitoring
+    func stopMonitoring() {
+        monitoringTask?.cancel()
+        monitoringTask = nil
+        
+        wakeContinuation?.finish()
+        wakeContinuation = nil
+        
+        monitor?.cancel()
+        monitor = nil
+    }
+    
     func isNetworkAvailable() async -> Bool {
-        isConnected
+        await check()
+        return isConnected
+    }
+    
+    private func check() async {
+        let reachable = await Self.probeConnectivity()
+        guard isConnected != reachable else { return }
+        print("🌐 Network status:", reachable ? "CONNECTED" : "OFFLINE")
+        isConnected = reachable
+    }
+    
+    nonisolated private static func probeConnectivity() async -> Bool {
+        guard let url = URL(
+            string: "https://www.apple.com/library/test/success.html"
+        ) else {
+            return false
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "HEAD"
+        request.timeoutInterval = 3
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.waitsForConnectivity = false
+        configuration.timeoutIntervalForRequest = 3
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+        }
+        do {
+            let (_, response) = try await session.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse else { return false }
+            return (200...299).contains(httpResponse.statusCode)
+        } catch {
+            return false
+        }
     }
     
     deinit {
-        monitor.cancel()
+        monitor?.cancel()
     }
 }
-
 protocol NetworkMonitoring: AnyObject, Sendable {
     func isNetworkAvailable() async -> Bool
 }
