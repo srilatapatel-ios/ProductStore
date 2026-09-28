@@ -40,12 +40,11 @@ final class DataStore: DataStoring {
     // MARK: - Products
     
     func fetchProducts() throws -> [ProductDataEntity] {
-        let descriptor = FetchDescriptor<ProductDataEntity>(
-            sortBy: [
-                SortDescriptor(\.id)
-            ]
-        )
-        return try modelContext.fetch(descriptor)
+        let descriptor = FetchDescriptor<ProductDataEntity>(sortBy: [SortDescriptor(\.id)])
+        let products = try modelContext.fetch(descriptor)
+        let localProducts = products.filter { $0.id >= 10_000 }
+        let existingProducts = products.filter { $0.id < 10_000 }
+        return localProducts + existingProducts
     }
     
     // MARK: - Favorites
